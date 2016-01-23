@@ -21,6 +21,13 @@ function (angular, _, $, dateMath, moment) {
       this.basicAuth = datasource.basicAuth;
       this.withCredentials = datasource.withCredentials;
       this.name = datasource.name;
+
+      this.apiVersion = 4;
+      if (datasource.jsonData.cmAPIVersion === 'v6-10') {
+        this.apiVersion = 6;
+      } else if (datasource.jsonData.cmAPIVersion === 'v11+') {
+        this.apiVersion = 11;
+      }
     }
 
     // Helper to make API requests to Cloudera Manager. To avoid CORS issues, the requests may be proxied
@@ -68,15 +75,19 @@ function (angular, _, $, dateMath, moment) {
         .filter(function(target) { return target.target && !target.hide; })
         .map(function(target) {
           var requestOptions = {
-            url: '/api/v10/timeseries',
+            url: '/api/v' + self.apiVersion + '/timeseries',
             params: {
               query: target.target,
               from: queryOptions.range.from.toJSON(),
               to: queryOptions.range.to.toJSON(),
-              contentType: 'application/json',
             }
           };
-          return self._request(requestOptions).then(self.convertResponse);
+
+          if (self.apiVersion >= 6) {
+            requestOptions.params.contentType = 'application/json';
+          }
+
+          return self._request(requestOptions).then(_.bind(self.convertResponse, self));
         })
         .value();
 
@@ -89,6 +100,19 @@ function (angular, _, $, dateMath, moment) {
         result.data = _.flatten(result.data);
         return result;
       });
+    };
+
+    // Convert the metadata returned from Cloudera Manager into the timeseries name for Grafana.
+    ClouderaManagerDatasource.prototype._makeTimeseriesName = function(metadata) {
+      if (metadata.metricName && metadata.entityName) {
+        return metadata.metricName + ' (' + metadata.entityName  + ')';
+      } else if (metadata.metricName) {
+        return metadata.metricName;
+      } else if (metadata.entityName) {
+        return metadata.entityName;
+      } else {
+        return 'UNKNOWN NAME';
+      }
     };
 
     // Convert the Cloudera Manager response to the format expected by Grafana.
@@ -109,22 +133,35 @@ function (angular, _, $, dateMath, moment) {
     //     {
     //       metadata: {
     //         metricName: "metricName1",
+    //         entityName: "entityName1",
+    //         ...
     //       },
-    //       timeSeries: {
-    //         value: 45.1234,
-    //         timestamp: "2015-10-02T12:58:24.009Z",
-    //       }
+    //       data: [
+    //         {
+    //           value: 45.1234,
+    //           timestamp: "2015-10-02T12:58:24.009Z",
+    //           ...
+    //         }, {
+    //           value: 98.7654,
+    //           timestamp: "2015-10-02T12:59:24.009Z",
+    //           ...
+    //         }
+    //         ... (more datapoints)
+    //       ]
     //     }
+    //     ... (more timeseries)
     //   ]
     // }
     ClouderaManagerDatasource.prototype.convertResponse = function(response) {
+      var self = this;
+
       if (!response || !response.data || !response.data.items) { return []; }
 
       var seriesList = [];
       _(response.data.items).forEach(function(item) {
         _.forEach(item.timeSeries, function(timeSeries) {
           seriesList.push({
-            target: timeSeries.metadata.metricName,
+            target: self._makeTimeseriesName(timeSeries.metadata),
             datapoints: _.map(timeSeries.data, function(point) {
               var ts = moment.utc(dateMath.parse(point.timestamp)).unix() * 1000;
               return [point.value, ts];
